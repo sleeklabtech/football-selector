@@ -280,7 +280,9 @@ app.get("/api/matches", async (req, res) => {
         fixture.awayTeam?.id
       );
 
-      if (!homeStats || !awayStats) continue;
+if (!homeStats || !awayStats) {
+  console.log("Missing standings data:", fixture.homeTeam?.name, fixture.awayTeam?.name);
+}
 
       const prediction = calculatePrediction(
         homeStats,
