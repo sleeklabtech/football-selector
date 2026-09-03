@@ -11,6 +11,9 @@ const cache = new Map();
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
 
 function clamp(x){ return Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0)); }
 function pct(x){ const n=Number(String(x??"").replace("%","")); return Number.isFinite(n)?n/100:null; }
