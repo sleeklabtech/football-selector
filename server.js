@@ -1,102 +1,388 @@
 const express = require("express");
 const path = require("path");
-const fs = require("fs");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.API_FOOTBALL_KEY;
-const BASE = "https://v3.football.api-sports.io";
+
+const API_TOKEN = process.env.FOOTBALL_DATA_TOKEN;
+const BASE = "https://api.football-data.org/v4";
+
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const cache = new Map();
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
+
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-function clamp(x){ return Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0)); }
-function pct(x){ const n=Number(String(x??"").replace("%","")); return Number.isFinite(n)?n/100:null; }
-function cacheGet(key){ const v=cache.get(key); if(!v) return null; if(Date.now()-v.t>CACHE_TTL_MS){cache.delete(key);return null;} return v.data; }
-function cacheSet(key,data){cache.set(key,{t:Date.now(),data});return data;}
-
-async function api(endpoint, params={}, ttl=CACHE_TTL_MS){
-  if(!API_KEY) throw new Error("Missing API_FOOTBALL_KEY. Set it before starting the server.");
-  const url = new URL(BASE + endpoint);
-  Object.entries(params).forEach(([k,v])=>{ if(v!==undefined && v!=="") url.searchParams.set(k,v); });
-  const key=url.toString();
-  const hit=cacheGet(key); if(hit) return hit;
-  const r=await fetch(url,{headers:{"x-apisports-key":API_KEY}});
-  const j=await r.json();
-  if(!r.ok || (j.errors && Object.keys(j.errors).length)) throw new Error(JSON.stringify(j.errors||`HTTP ${r.status}`));
-  return cacheSet(key,j);
+function clamp(x) {
+  return Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0));
 }
 
-function fixtureToMatch(f){
-  return {id:f.fixture?.id,home:f.teams?.home?.name,away:f.teams?.away?.name,kickoff:f.fixture?.date,homeId:f.teams?.home?.id,awayId:f.teams?.away?.id,status:f.fixture?.status?.short};
-}
+function cacheGet(key) {
+  const v = cache.get(key);
+  if (!v) return null;
 
-async function teamStats(league,season,team){
-  try{
-    const d=(await api("/teams/statistics",{league,season,team},12*60*60*1000)).response||{};
-    const gf=Number(d.goals?.for?.average?.total)||0, ga=Number(d.goals?.against?.average?.total)||0;
-    const form=(d.form||"").slice(-5);
-    const formScore=form.length?[...form].reduce((s,c)=>s+(c==="W"?1:c==="D"?.5:0),0)/form.length:.5;
-    const wins=Number(d.fixtures?.wins?.total)||0, played=Number(d.fixtures?.played?.total)||1;
-    const venue=d.venue?.wins?.percentage ? Number(d.venue.wins.percentage)/100 : null;
-    return {gf,ga,formScore,winRate:wins/played,venue};
-  }catch{return null}
-}
-
-function injuryScores(rows, homeId, awayId){
-  const out={home:0,away:0,homeCount:0,awayCount:0};
-  for(const x of rows){
-    const tid=x.team?.id;
-    if(tid===homeId){out.homeCount++; out.home+=1;}
-    if(tid===awayId){out.awayCount++; out.away+=1;}
+  if (Date.now() - v.t > CACHE_TTL_MS) {
+    cache.delete(key);
+    return null;
   }
-  // Count is deliberately capped: this is a simple availability signal, not a player-value model.
-  return {homeInjuries:clamp(out.home/8),awayInjuries:clamp(out.away/8),homeCount:out.homeCount,awayCount:out.awayCount};
+
+  return v.data;
 }
 
-async function leagueInjuries(league,season,date){
-  try{
-    const j=await api("/injuries",{league,season,date},4*60*60*1000);
-    return j.response||[];
-  }catch{return []}
+function cacheSet(key, data) {
+  cache.set(key, {
+    t: Date.now(),
+    data
+  });
+
+  return data;
 }
 
-app.get("/api/health",(req,res)=>res.json({ok:true,apiKeyConfigured:Boolean(API_KEY),cacheEntries:cache.size}));
+async function api(endpoint, params = {}) {
+  if (!API_TOKEN) {
+    throw new Error(
+      "Missing FOOTBALL_DATA_TOKEN. Add it to Render Environment Variables."
+    );
+  }
 
-app.get("/api/matches",async(req,res)=>{
-  try{
-    const league=Number(req.query.league||39), date=req.query.date;
-    if(!date) return res.status(400).json({error:"Choose a date."});
-    const fixtures=(await api("/fixtures",{league,date,status:"NS"},10*60*1000)).response||[];
-    const season=fixtures[0]?.league?.season || new Date(date).getFullYear();
-    const injuries=await leagueInjuries(league,season,date);
-    const teamCache=new Map();
-    const getStats=async id=>{if(!teamCache.has(id))teamCache.set(id,teamStats(league,season,id));return teamCache.get(id)};
-    const out=[];
-    for(const f of fixtures){
-      const h=f.teams.home,a=f.teams.away;
-      const [hs,as]=await Promise.all([getStats(h.id),getStats(a.id)]);
-      if(!hs||!as) continue;
-      const ins=injuryScores(injuries,h.id,a.id);
-      const homeVenue=hs.venue??hs.winRate, awayVenue=as.venue??as.winRate;
-      out.push({...fixtureToMatch(f),
-        homeForm:clamp(hs.formScore),awayForm:clamp(as.formScore),
-        homeVenue:clamp(homeVenue),awayVenue:clamp(awayVenue),
-        homeAttack:clamp(hs.gf/3),awayAttack:clamp(as.gf/3),
-        homeDefense:clamp(1-hs.ga/3),awayDefense:clamp(1-as.ga/3),
-        homeInjuries:ins.homeInjuries,awayInjuries:ins.awayInjuries,
-        homeInjuryCount:ins.homeCount,awayInjuryCount:ins.awayCount,
-        homeMotivation:.70,awayMotivation:.70,homeTactical:.50,awayTactical:.50,
-        dataQuality:{stats:true,injuries:injuries.length>0,injuryRows:injuries.length}
-      });
+  const url = new URL(BASE + endpoint);
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") {
+      url.searchParams.set(key, value);
     }
-    res.json({matches:out,count:out.length,fixturesFound:fixtures.length,season,injuryRows:injuries.length,generatedAt:new Date().toISOString(),note:"Motivation and tactical scores remain neutral placeholders; verify these manually."});
-  }catch(e){res.status(500).json({error:e.message})}
+  });
+
+  const cacheKey = url.toString();
+  const cached = cacheGet(cacheKey);
+
+  if (cached) return cached;
+
+  const response = await fetch(url, {
+    headers: {
+      "X-Auth-Token": API_TOKEN
+    }
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      data.message || `Football-data API error: HTTP ${response.status}`
+    );
+  }
+
+  return cacheSet(cacheKey, data);
+}
+
+
+/*
+  Football-data.org competition codes.
+
+  PL  = Premier League
+  PD  = La Liga
+  SA  = Serie A
+  BL1 = Bundesliga
+  FL1 = Ligue 1
+  DED = Eredivisie
+  PPL = Primeira Liga
+  CL  = Champions League
+*/
+
+const COMPETITIONS = {
+  39: "PL",
+  140: "PD",
+  135: "SA",
+  78: "BL1",
+  61: "FL1",
+  88: "DED",
+  94: "PPL",
+  2: "CL"
+};
+
+
+function fixtureToMatch(match) {
+  return {
+    id: match.id,
+    home: match.homeTeam?.name,
+    away: match.awayTeam?.name,
+    kickoff: match.utcDate,
+    homeId: match.homeTeam?.id,
+    awayId: match.awayTeam?.id,
+    status: match.status
+  };
+}
+
+
+/*
+  Convert league standings into useful prediction numbers.
+*/
+async function getStandings(competition) {
+  const data = await api(`/competitions/${competition}/standings`);
+
+  const total =
+    data.standings?.find(x => x.type === "TOTAL") ||
+    data.standings?.[0];
+
+  return total?.table || [];
+}
+
+
+function getTeamStats(table, teamId) {
+  const row = table.find(x => x.team?.id === teamId);
+
+  if (!row) return null;
+
+  const played = Number(row.played) || 1;
+  const points = Number(row.points) || 0;
+  const wins = Number(row.won) || 0;
+  const goalsFor = Number(row.goalsFor) || 0;
+  const goalsAgainst = Number(row.goalsAgainst) || 0;
+
+  return {
+    position: Number(row.position) || 0,
+    played,
+    points,
+    pointsRate: points / (played * 3),
+    winRate: wins / played,
+    goalsFor: goalsFor / played,
+    goalsAgainst: goalsAgainst / played
+  };
+}
+
+
+/*
+  Calculate a simple prediction score.
+
+  This is deliberately lightweight for now.
+  We'll improve the model after the API connection works.
+*/
+function calculatePrediction(home, away) {
+  if (!home || !away) {
+    return {
+      homeScore: 0.5,
+      awayScore: 0.5,
+      confidence: 0
+    };
+  }
+
+  const homeStrength =
+    home.pointsRate * 0.45 +
+    home.winRate * 0.30 +
+    clamp(home.goalsFor / 3) * 0.15 +
+    clamp(1 - home.goalsAgainst / 3) * 0.10;
+
+  const awayStrength =
+    away.pointsRate * 0.45 +
+    away.winRate * 0.30 +
+    clamp(away.goalsFor / 3) * 0.15 +
+    clamp(1 - away.goalsAgainst / 3) * 0.10;
+
+  /*
+    Home advantage.
+  */
+  const adjustedHome = homeStrength + 0.08;
+
+  const total = adjustedHome + awayStrength || 1;
+
+  const homeScore = clamp(adjustedHome / total);
+  const awayScore = clamp(awayStrength / total);
+
+  const confidence =
+    Math.abs(homeScore - awayScore);
+
+  let prediction = "DRAW";
+
+  if (homeScore > awayScore + 0.08) {
+    prediction = "HOME";
+  } else if (awayScore > homeScore + 0.08) {
+    prediction = "AWAY";
+  }
+
+  return {
+    homeScore,
+    awayScore,
+    confidence,
+    prediction
+  };
+}
+
+
+app.get("/api/health", (req, res) => {
+  res.json({
+    ok: true,
+    apiConfigured: Boolean(API_TOKEN),
+    cacheEntries: cache.size
+  });
 });
 
-app.listen(PORT,'0.0.0.0',()=>console.log(`Football Selector running on port ${PORT}`));
+
+app.get("/api/matches", async (req, res) => {
+  try {
+    const league = Number(req.query.league || 39);
+    const date = req.query.date;
+
+    if (!date) {
+      return res.status(400).json({
+        error: "Choose a date."
+      });
+    }
+
+    const competition = COMPETITIONS[league];
+
+    if (!competition) {
+      return res.status(400).json({
+        error:
+          "This league is not currently supported by football-data.org."
+      });
+    }
+
+
+    /*
+      Get matches for the requested date.
+
+      We use the dateFrom/dateTo filters provided by football-data.org.
+    */
+    const matchesData = await api(
+      `/competitions/${competition}/matches`,
+      {
+        dateFrom: date,
+        dateTo: date
+      }
+    );
+
+    const fixtures = (matchesData.matches || [])
+      .filter(match =>
+        ["SCHEDULED", "TIMED"].includes(match.status)
+      );
+
+
+    /*
+      Get the current league standings.
+    */
+    const table = await getStandings(competition);
+
+
+    const output = [];
+
+    for (const fixture of fixtures) {
+      const homeStats = getTeamStats(
+        table,
+        fixture.homeTeam?.id
+      );
+
+      const awayStats = getTeamStats(
+        table,
+        fixture.awayTeam?.id
+      );
+
+      if (!homeStats || !awayStats) continue;
+
+      const prediction = calculatePrediction(
+        homeStats,
+        awayStats
+      );
+
+      output.push({
+        ...fixtureToMatch(fixture),
+
+        homeForm: clamp(homeStats.pointsRate),
+        awayForm: clamp(awayStats.pointsRate),
+
+        homeVenue: clamp(homeStats.winRate + 0.08),
+        awayVenue: clamp(awayStats.winRate),
+
+        homeAttack: clamp(homeStats.goalsFor / 3),
+        awayAttack: clamp(awayStats.goalsFor / 3),
+
+        homeDefense: clamp(
+          1 - homeStats.goalsAgainst / 3
+        ),
+
+        awayDefense: clamp(
+          1 - awayStats.goalsAgainst / 3
+        ),
+
+        /*
+          Injury information is temporarily neutral.
+          football-data.org does not provide the same injury
+          endpoint we were using with API-Football.
+        */
+        homeInjuries: 0,
+        awayInjuries: 0,
+        homeInjuryCount: 0,
+        awayInjuryCount: 0,
+
+        homeMotivation: 0.70,
+        awayMotivation: 0.70,
+
+        homeTactical: 0.50,
+        awayTactical: 0.50,
+
+        prediction: prediction.prediction,
+
+        homeProbability: Number(
+          prediction.homeScore.toFixed(3)
+        ),
+
+        awayProbability: Number(
+          prediction.awayScore.toFixed(3)
+        ),
+
+        confidence: Number(
+          prediction.confidence.toFixed(3)
+        ),
+
+        homePosition: homeStats.position,
+        awayPosition: awayStats.position,
+
+        dataQuality: {
+          standings: true,
+          injuries: false
+        }
+      });
+    }
+
+
+    /*
+      Strongest matches first.
+    */
+    output.sort(
+      (a, b) => b.confidence - a.confidence
+    );
+
+
+    res.json({
+      matches: output,
+      count: output.length,
+      fixturesFound: fixtures.length,
+      competition,
+      generatedAt: new Date().toISOString(),
+
+      note:
+        "Prediction currently uses league standings, win rate, points rate and goals. Injury data is not currently available from this provider."
+    });
+
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      error: error.message
+    });
+  }
+});
+
+
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log(
+      `Football Selector running on port ${PORT}`
+    );
+  }
+);
