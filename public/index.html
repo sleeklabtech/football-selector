@@ -7,7 +7,16 @@ body{font-family:system-ui;margin:0;background:#f5f6f8;color:#17202a}main{max-wi
 <h1>⚽ Football Selector — Live Data v2</h1>
 <p class="muted">Cached team statistics + live fixture list + competition injury report, with transparent ranking and data-quality flags.</p>
 <div class="card"><div class="controls">
-<div class="field"><label>League</label><select id="league"><option value="39">Premier League</option><option value="140">La Liga</option><option value="135">Serie A</option><option value="78">Bundesliga</option><option value="61">Ligue 1</option><option value="2">Champions League</option></select></div>
+<select id="league">
+  <option value="39">Premier League</option>
+  <option value="140">La Liga</option>
+  <option value="135">Serie A</option>
+  <option value="78">Bundesliga</option>
+  <option value="61">Ligue 1</option>
+  <option value="88">Eredivisie</option>
+  <option value="94">Primeira Liga</option>
+  <option value="2">Champions League</option>
+</select>
 <div class="field"><label>Date</label><input id="date" type="date"></div><div class="field"><label>Top matches</label><input id="topN" type="number" min="1" max="50" value="10"></div>
 <button id="load">Load fixtures</button><button id="demo" class="secondary">Demo</button></div>
 <p class="tiny">API-Football currently advertises fixtures, injuries, lineups, statistics, odds and historical data. This app deliberately keeps motivation/tactics neutral until those signals are modeled properly.</p></div>
